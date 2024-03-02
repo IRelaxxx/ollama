@@ -212,9 +212,9 @@ if ($null -eq $script:CUDA_LIB_DIR) {
     compress_libs
 }
 
-rm -ea 0 -recurse -force -path "${script:buildDir}/lib"
-md "${script:buildDir}/lib" -ea 0 > $null
-echo $null >> "${script:buildDir}/lib/.generated"
+# rm -ea 0 -recurse -force -path "${script:buildDir}/lib"
+# md "${script:buildDir}/lib" -ea 0 > $null
+# echo $null >> "${script:buildDir}/lib/.generated"
 
 cleanup
 write-host "`ngo generate completed"
