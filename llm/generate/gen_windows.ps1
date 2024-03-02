@@ -201,6 +201,17 @@ if ($null -ne $script:CUDA_LIB_DIR) {
 # TODO - actually implement ROCm support on windows
 $script:buildDir="${script:llamacppDir}/build/windows/${script:ARCH}/rocm"
 
+if ($null -eq $script:CUDA_LIB_DIR) {
+    # Then build vulcan as a dynamically loaded library if both cuda and rocm are not supportet
+    init_vars
+    $script:buildDir="${script:llamacppDir}/build/windows/${script:ARCH}/vulkan"
+    $script:cmakeDefs += @("-DLLAMA_AVX=on", "-DLLAMA_AVX2=off", "-DLLAMA_VULKAN=on")
+    build
+    install
+    sign
+    compress_libs
+}
+
 rm -ea 0 -recurse -force -path "${script:buildDir}/lib"
 md "${script:buildDir}/lib" -ea 0 > $null
 echo $null >> "${script:buildDir}/lib/.generated"
