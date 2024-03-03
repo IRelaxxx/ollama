@@ -12,6 +12,8 @@
 
 #define VK_MEMORY_HEAP_DEVICE_LOCAL_BIT  0x00000001
 
+#define VK_EXT_MEMORY_BUDGET_EXTENSION_NAME "VK_EXT_memory_budget"
+
 #define VK_DEFINE_HANDLE(object) typedef struct object##_T* object;
 VK_DEFINE_HANDLE(VkInstance)
 VK_DEFINE_HANDLE(VkPhysicalDevice)
@@ -194,9 +196,23 @@ typedef struct VkPhysicalDeviceProperties {
 typedef enum VkStructureType {
     VK_STRUCTURE_TYPE_APPLICATION_INFO = 0,
     VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO = 1,
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2 = 1000059006,
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT = 1000237000,
     // others ommited
 } VkStructureType;
 
+typedef struct VkPhysicalDeviceMemoryBudgetPropertiesEXT {
+    VkStructureType    sType;
+    void*              pNext;
+    VkDeviceSize       heapBudget[VK_MAX_MEMORY_HEAPS];
+    VkDeviceSize       heapUsage[VK_MAX_MEMORY_HEAPS];
+} VkPhysicalDeviceMemoryBudgetPropertiesEXT;
+
+typedef struct VkPhysicalDeviceMemoryProperties2 {
+    VkStructureType                     sType;
+    void*                               pNext;
+    VkPhysicalDeviceMemoryProperties    memoryProperties;
+} VkPhysicalDeviceMemoryProperties2;
 
 typedef struct VkApplicationInfo {
     VkStructureType    sType;
@@ -219,20 +235,20 @@ typedef struct VkInstanceCreateInfo {
     const char* const*          ppEnabledExtensionNames;
 } VkInstanceCreateInfo;
 
-typedef enum vulkan_status_return {
+typedef enum VkResult {
   VULKAN_STATUS_SUCCESS = 0,
   // Other values omitted for now...
-} vulkan_status_t;
+} VkResult;
 
 typedef struct vulkan_handle {
   void *handle;
   void *vkInstance;
   uint16_t verbose;
-  vulkan_status_t (*vulkan_init)(const VkInstanceCreateInfo*, void*, VkInstance*);
-  vulkan_status_t (*vulkan_shut_down)(void*, void*);
-  vulkan_status_t (*vulkan_enumerate_physical_devices)(VkInstance, uint32_t*, VkPhysicalDevice*);
-  vulkan_status_t (*vulkan_get_physical_memory_properties)(VkPhysicalDevice, VkPhysicalDeviceMemoryProperties*);
-  vulkan_status_t (*vulkan_get_physical_device_properties)(VkPhysicalDevice, VkPhysicalDeviceProperties*);
+  VkResult (*vulkan_init)(const VkInstanceCreateInfo*, void*, VkInstance*);
+  VkResult (*vulkan_shut_down)(void*, void*);
+  VkResult (*vulkan_enumerate_physical_devices)(VkInstance, uint32_t*, VkPhysicalDevice*);
+  VkResult (*vulkan_get_physical_memory_properties)(VkPhysicalDevice, VkPhysicalDeviceMemoryProperties2*);
+  VkResult (*vulkan_get_physical_device_properties)(VkPhysicalDevice, VkPhysicalDeviceProperties*);
 } vulkan_handle_t;
 
 typedef struct vulkan_init_resp {
@@ -241,7 +257,7 @@ typedef struct vulkan_init_resp {
 } vulkan_init_resp_t;
 
 typedef struct vulkan_version_resp {
-  vulkan_status_t status;
+  VkResult status;
   char *str; // Contains version or error string if status != 0 
 } vulkan_version_resp_t;
 

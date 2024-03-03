@@ -5,7 +5,7 @@
 #include <string.h>
 
 void vulkan_init(char *vulkan_lib_path, vulkan_init_resp_t *resp) {
-  vulkan_status_t ret;
+  VkResult ret;
   resp->err = NULL;
   const int buflen = 256;
   char buf[buflen + 1];
@@ -17,7 +17,7 @@ void vulkan_init(char *vulkan_lib_path, vulkan_init_resp_t *resp) {
       {"vkCreateInstance", (void *)&resp->rh.vulkan_init},
       {"vkDestroyInstance", (void *)&resp->rh.vulkan_shut_down},
       {"vkEnumeratePhysicalDevices", (void *)&resp->rh.vulkan_enumerate_physical_devices},
-      {"vkGetPhysicalDeviceMemoryProperties", (void *)&resp->rh.vulkan_get_physical_memory_properties},
+      {"vkGetPhysicalDeviceMemoryProperties2", (void *)&resp->rh.vulkan_get_physical_memory_properties},
       {"vkGetPhysicalDeviceProperties", (void *)&resp->rh.vulkan_get_physical_device_properties},
       {NULL, NULL},
   };
@@ -57,9 +57,9 @@ void vulkan_init(char *vulkan_lib_path, vulkan_init_resp_t *resp) {
   VkApplicationInfo appInfo = {};
   appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
   appInfo.pApplicationName = "ollama";
-  appInfo.applicationVersion = VK_MAKE_API_VERSION(0, 1, 0, 0);
+  appInfo.applicationVersion = VK_MAKE_API_VERSION(0, 1, 1, 0);
   appInfo.pEngineName = "No Engine";
-  appInfo.engineVersion = VK_MAKE_API_VERSION(0, 1, 0, 0);
+  appInfo.engineVersion = VK_MAKE_API_VERSION(0, 1, 1, 0);
   appInfo.apiVersion = VK_API_VERSION_1_1;
   appInfo.pNext = NULL;
 
@@ -68,7 +68,7 @@ void vulkan_init(char *vulkan_lib_path, vulkan_init_resp_t *resp) {
   createInfo.pNext = NULL;
   createInfo.flags = 0;
   createInfo.pApplicationInfo = &appInfo;
-  createInfo.enabledLayerCount = 0;
+  createInfo.enabledExtensionCount = 0;
   createInfo.ppEnabledExtensionNames = NULL;
   createInfo.enabledLayerCount = 0;
   createInfo.ppEnabledLayerNames = NULL;
@@ -81,6 +81,7 @@ void vulkan_init(char *vulkan_lib_path, vulkan_init_resp_t *resp) {
     resp->rh.handle = NULL;
     snprintf(buf, buflen, "vulkan vram init failure: %d", ret);
     resp->err = strdup(buf);
+    return;
   }
 
   LOG(resp->rh.verbose, "vulkan_init success\n");
@@ -94,7 +95,7 @@ void vulkan_get_version(vulkan_handle_t h, vulkan_version_resp_t *resp) {
   if (h.handle == NULL) {
     return;
   }
-  vulkan_status_t ret;
+  VkResult ret;
   int igpuIndex = -1;
   uint32_t device_count = MAX_GPU_COUNT;
   VkPhysicalDevice devices[MAX_GPU_COUNT];
@@ -130,7 +131,7 @@ void vulkan_check_vram(vulkan_handle_t h, mem_info_t *resp) {
   if (h.handle == NULL) {
     return;
   }
-  vulkan_status_t ret;
+  VkResult ret;
   int igpuIndex = -1;
   uint32_t device_count = MAX_GPU_COUNT;
   VkPhysicalDevice devices[MAX_GPU_COUNT];
@@ -147,16 +148,28 @@ void vulkan_check_vram(vulkan_handle_t h, mem_info_t *resp) {
     resp->err = strdup(buf);
   }
   uint64_t totalMem = 0;
+  uint64_t usedMem = 0;
   for(uint32_t i = 0; i < device_count; i++) {
-    VkPhysicalDeviceMemoryProperties props;
-    h.vulkan_get_physical_memory_properties(devices[i], &props);
-    LOG(h.verbose, "vulkan_get_physical_memory_properties success found %d heaps\n", props.memoryHeapCount);
+    VkPhysicalDeviceMemoryProperties2 props;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT budgetProps;
 
-    for(uint32_t j = 0; j < props.memoryHeapCount; j++) {
-      if(props.memoryHeaps[j].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT > 0) {
-        totalMem += props.memoryHeaps[j].size;
+    budgetProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+    budgetProps.pNext = NULL;
+
+    props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+    props.pNext = &budgetProps;
+
+    h.vulkan_get_physical_memory_properties(devices[i], &props);
+    LOG(h.verbose, "vulkan_get_physical_memory_properties success found %d heaps\n", props.memoryProperties.memoryHeapCount);
+
+    for(uint32_t j = 0; j < props.memoryProperties.memoryHeapCount; j++) {
+      LOG(h.verbose, "%d heapBudget %d heapUsage %d\n", j, budgetProps.heapBudget[j], budgetProps.heapUsage[j]);
+      if(props.memoryProperties.memoryHeaps[j].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT > 0) {
+        usedMem += budgetProps.heapUsage[j];
+        totalMem += budgetProps.heapBudget[j];
       }
     }
+
     VkPhysicalDeviceProperties physProps;
     h.vulkan_get_physical_device_properties(devices[i], &physProps);
     LOG(h.verbose, "vulkan_get_physical_device_properties success\n");
@@ -167,8 +180,7 @@ void vulkan_check_vram(vulkan_handle_t h, mem_info_t *resp) {
   }
 
   resp->total = totalMem;
-  // TODO implement
-  resp->free = totalMem;
+  resp->free = totalMem - usedMem;
   resp->count = device_count;
   resp->igpu_index = igpuIndex;
 }

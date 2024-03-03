@@ -114,7 +114,7 @@ func New(workDir, model string, adapters, projectors []string, opts api.Options)
 			opts.NumGPU = 0
 			break
 		}
-
+		slog.Debug("gpu layer offload calculation", "min", min, "graph", graph, "kv", kv, "layers", layers, "maxLayers", maxlayers, "vram", vram, "avg", avg)
 		opts.NumGPU = int(layers)
 	}
 

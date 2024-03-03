@@ -290,6 +290,10 @@ func CheckVRAM() (int64, error) {
 		if overhead < gpus*1024*1024*1024 {
 			overhead = gpus * 1024 * 1024 * 1024
 		}
+		if gpuInfo.Library == "vulkan" {
+			// on vulkan more free memory is needed
+			overhead = overhead * 2
+		}
 		avail := int64(gpuInfo.FreeMemory - overhead)
 		slog.Debug(fmt.Sprintf("%s detected %d devices with %dM available memory", gpuInfo.Library, gpuInfo.DeviceCount, avail/1024/1024))
 		return avail, nil
@@ -386,10 +390,10 @@ func LoadROCMMgmt(rocmLibPaths []string) *C.rocm_handle_t {
 	return nil
 }
 
-func LoadVulkanMgmt(rocmLibPaths []string) *C.vulkan_handle_t {
+func LoadVulkanMgmt(vulkanLibPaths []string) *C.vulkan_handle_t {
 	var resp C.vulkan_init_resp_t
 	resp.rh.verbose = getVerboseState()
-	for _, libPath := range rocmLibPaths {
+	for _, libPath := range vulkanLibPaths {
 		lib := C.CString(libPath)
 		defer C.free(unsafe.Pointer(lib))
 		C.vulkan_init(lib, &resp)

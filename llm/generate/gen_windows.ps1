@@ -202,10 +202,10 @@ if ($null -ne $script:CUDA_LIB_DIR) {
 $script:buildDir="${script:llamacppDir}/build/windows/${script:ARCH}/rocm"
 
 if ($null -eq $script:CUDA_LIB_DIR) {
-    # Then build vulcan as a dynamically loaded library if both cuda and rocm are not supportet
+    # Then build vulcan as a dynamically loaded library if both cuda and rocm are not supported
     init_vars
     $script:buildDir="${script:llamacppDir}/build/windows/${script:ARCH}/vulkan"
-    $script:cmakeDefs += @("-DLLAMA_AVX=on", "-DLLAMA_AVX2=off", "-DLLAMA_VULKAN=on")
+    $script:cmakeDefs += @("-DLLAMA_AVX=off", "-DLLAMA_AVX2=on", "-DLLAMA_VULKAN=on", "-DLLAMA_VULKAN_DEBUG=off")
     build
     install
     sign
