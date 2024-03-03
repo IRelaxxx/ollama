@@ -64,6 +64,7 @@ type ChatCompletionRequest struct {
 	PresencePenalty  *float64        `json:"presence_penalty_penalty"`
 	TopP             *float64        `json:"top_p"`
 	ResponseFormat   *ResponseFormat `json:"response_format"`
+	NumContext       *int            `json:"num_ctx"`
 }
 
 type ChatCompletion struct {
@@ -199,6 +200,10 @@ func fromRequest(r ChatCompletionRequest) api.ChatRequest {
 		options["top_p"] = *r.TopP
 	} else {
 		options["top_p"] = 1.0
+	}
+
+	if r.NumContext != nil {
+		options["num_ctx"] = *r.NumContext
 	}
 
 	var format string
