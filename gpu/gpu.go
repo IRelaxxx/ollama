@@ -90,7 +90,7 @@ func initGPUHandles() *handles {
 		cudartMgmtPatterns = []string{filepath.Join(localAppData, "Programs", "Ollama", cudartMgmtName)}
 		cudartMgmtPatterns = append(cudartMgmtPatterns, CudartWindowsGlobs...)
 		vulkanMgmtName = "vulkan-1.dll"
-		vulkanMgmtPatterns = make([]string, len(RocmWindowsGlobs))
+		vulkanMgmtPatterns = make([]string, len(VulkanWindowsGlobs))
 		copy(vulkanMgmtPatterns, VulkanWindowsGlobs)
 	case "linux":
 		cudartMgmtName = "libcudart.so*"
@@ -151,57 +151,72 @@ func GetGPUInfo() GpuInfoList {
 	resp := []GpuInfo{}
 
 	// NVIDIA first
-	for i := 0; i < gpuHandles.deviceCount; i++ {
-		// TODO once we support CPU compilation variants of GPU libraries refine this...
-		if cpuVariant == "" && runtime.GOARCH == "amd64" {
-			continue
-		}
-		gpuInfo := GpuInfo{
-			Library: "cuda",
-		}
-		C.cudart_check_vram(*gpuHandles.cudart, C.int(i), &memInfo)
-		if memInfo.err != nil {
-			slog.Info("error looking up nvidia GPU memory", "error", C.GoString(memInfo.err))
-			C.free(unsafe.Pointer(memInfo.err))
-			continue
-		}
-		if memInfo.major < CudaComputeMin[0] || (memInfo.major == CudaComputeMin[0] && memInfo.minor < CudaComputeMin[1]) {
-			slog.Info(fmt.Sprintf("[%d] CUDA GPU is too old. Compute Capability detected: %d.%d", i, memInfo.major, memInfo.minor))
-			continue
-		}
-		gpuInfo.TotalMemory = uint64(memInfo.total)
-		gpuInfo.FreeMemory = uint64(memInfo.free)
-		gpuInfo.ID = C.GoString(&memInfo.gpu_id[0])
-		gpuInfo.Major = int(memInfo.major)
-		gpuInfo.Minor = int(memInfo.minor)
-		gpuInfo.MinimumMemory = cudaMinimumMemory
-
-		// TODO potentially sort on our own algorithm instead of what the underlying GPU library does...
-		resp = append(resp, gpuInfo)
-	}
-	if gpuHandles.vulkan != nil && gpuHandles.cuda == nil && gpuHandles.rocm == nil && (cpuVariant != "" || runtime.GOARCH != "amd64") {
+	//for i := 0; i < gpuHandles.deviceCount; i++ {
+	//	// TODO once we support CPU compilation variants of GPU libraries refine this...
+	//	if cpuVariant == "" && runtime.GOARCH == "amd64" {
+	//		continue
+	//	}
+	//	gpuInfo := GpuInfo{
+	//		Library: "cuda",
+	//	}
+	//	C.cudart_check_vram(*gpuHandles.cudart, C.int(i), &memInfo)
+	//	if memInfo.err != nil {
+	//		slog.Info("error looking up nvidia GPU memory", "error", C.GoString(memInfo.err))
+	//		C.free(unsafe.Pointer(memInfo.err))
+	//		continue
+	//	}
+	//	if memInfo.major < CudaComputeMin[0] || (memInfo.major == CudaComputeMin[0] && memInfo.minor < CudaComputeMin[1]) {
+	//		slog.Info(fmt.Sprintf("[%d] CUDA GPU is too old. Compute Capability detected: %d.%d", i, memInfo.major, memInfo.minor))
+	//		continue
+	//	}
+	//	gpuInfo.TotalMemory = uint64(memInfo.total)
+	//	gpuInfo.FreeMemory = uint64(memInfo.free)
+	//	gpuInfo.ID = C.GoString(&memInfo.gpu_id[0])
+	//	gpuInfo.Major = int(memInfo.major)
+	//	gpuInfo.Minor = int(memInfo.minor)
+	//	gpuInfo.MinimumMemory = cudaMinimumMemory
+	//
+	//	// TODO potentially sort on our own algorithm instead of what the underlying GPU library does...
+	//	resp = append(resp, gpuInfo)
+	//}
+	if gpuHandles.vulkan != nil && gpuHandles.cudart == nil && (cpuVariant != "" || runtime.GOARCH != "amd64") {
 		C.vulkan_check_vram(*gpuHandles.vulkan, &memInfo)
 		if memInfo.err != nil {
 			slog.Info(fmt.Sprintf("error looking up vulkan GPU memory: %s", C.GoString(memInfo.err)))
 			C.free(unsafe.Pointer(memInfo.err))
-		} else if memInfo.count > 0 {
+		} else if memInfo.total > 0 {
 			// Verify minimum compute capability
-			var version C.vulkan_version_resp_t
-			C.vulkan_get_version(*gpuHandles.vulkan, &version)
-			verString := C.GoString(version.str)
-			if version.status == 0 {
-				resp.Variant = "v" + verString
-			} else {
-				slog.Info(fmt.Sprintf("failed to look up vulkan version: %s", verString))
+			//var version C.vulkan_version_resp_t
+			//C.vulkan_get_version(*gpuHandles.vulkan, &version)
+			//verString := C.GoString(version.str)
+			//if version.status == 0 {
+			//	resp.Variant = "v" + verString
+			//} else {
+			//	slog.Info(fmt.Sprintf("failed to look up vulkan version: %s", verString))
+			//}
+			gpuInfo := GpuInfo{
+				Library: "vulkan",
 			}
+
 			// Copied from rocm, but this crashes?
 			//C.free(unsafe.Pointer(version.str))
-			resp.Library = "vulkan"
+			gpuInfo.TotalMemory = uint64(memInfo.total)
+			gpuInfo.FreeMemory = uint64(memInfo.free)
+			// higher numbers time out on my machine
+			gpuInfo.FreeMemory = uint64(4295000000)
+			//gpuInfo.ID = C.GoString(&memInfo.gpu_id[0])
+			//gpuInfo.Major = int(memInfo.major)
+			//gpuInfo.Minor = int(memInfo.minor)
+			//gpuInfo.MinimumMemory = cudaMinimumMemory
+
+			// TODO potentially sort on our own algorithm instead of what the underlying GPU library does...
+			resp = append(resp, gpuInfo)
+
 		}
 	}
 
 	// Then AMD
-	resp = append(resp, AMDGetGPUInfo()...)
+	//resp = append(resp, AMDGetGPUInfo()...)
 
 	if len(resp) == 0 {
 		C.cpu_check_ram(&memInfo)
@@ -235,27 +250,6 @@ func GetCPUMem() (memInfo, error) {
 	ret.FreeMemory = uint64(info.free)
 	ret.TotalMemory = uint64(info.total)
 	return ret, nil
-}
-
-func CheckVRAM() (int64, error) {
-	gpuInfo := GetGPUInfo()
-	if gpuInfo.FreeMemory > 0 && (gpuInfo.Library == "cuda" || gpuInfo.Library == "rocm" || gpuInfo.Library == "vulkan") {
-		// leave 10% or 1024MiB of VRAM free per GPU to handle unaccounted for overhead
-		overhead := gpuInfo.FreeMemory / 10
-		gpus := uint64(gpuInfo.DeviceCount)
-		if overhead < gpus*1024*1024*1024 {
-			overhead = gpus * 1024 * 1024 * 1024
-		}
-		if gpuInfo.Library == "vulkan" {
-			// on vulkan more free memory is needed
-			overhead = overhead * 2
-		}
-		avail := int64(gpuInfo.FreeMemory - overhead)
-		slog.Debug(fmt.Sprintf("%s detected %d devices with %dM available memory", gpuInfo.Library, gpuInfo.DeviceCount, avail/1024/1024))
-		return avail, nil
-	}
-
-	return 0, fmt.Errorf("no GPU detected") // TODO - better handling of CPU based memory determiniation
 }
 
 func FindGPULibs(baseLibName string, patterns []string) []string {

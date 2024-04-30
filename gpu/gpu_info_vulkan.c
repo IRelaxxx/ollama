@@ -181,8 +181,8 @@ void vulkan_check_vram(vulkan_handle_t h, mem_info_t *resp) {
 
   resp->total = totalMem;
   resp->free = totalMem - usedMem;
-  resp->count = device_count;
-  resp->igpu_index = igpuIndex;
+  //resp->count = device_count;
+  //resp->igpu_index = igpuIndex;
 }
 
-#endif  // __APPLE__
+#endif

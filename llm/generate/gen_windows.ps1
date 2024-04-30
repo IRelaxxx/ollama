@@ -218,14 +218,14 @@ function build_vulkan() {
         # remaining llama.cpp builds use MSVC 
         init_vars
         $script:cmakeDefs = $script:commonCpuDefs + @("-A", "x64", "-DLLAMA_VULKAN=on", "-DLLAMA_AVX=off", "-DLLAMA_AVX2=on", "-DLLAMA_AVX512=off", "-DLLAMA_FMA=off", "-DLLAMA_F16C=off") + $script:cmakeDefs
-        $script:buildDir="../build/windows/${script:ARCH}/cpu"
-        $script:distDir="$script:DIST_BASE\cpu"
-        write-host "Building LCD CPU"
+        $script:buildDir="../build/windows/${script:ARCH}/vulkan"
+        $script:distDir="$script:DIST_BASE\vulkan"
+        write-host "Building LCD Vulkan"
         build
         sign
         install
     } else {
-        write-host "Skipping CPU generation step as requested"
+        write-host "Skipping Vulkan generation step as requested"
     }
 }
 
