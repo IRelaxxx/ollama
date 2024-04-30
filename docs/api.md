@@ -54,7 +54,7 @@ Advanced parameters (optional):
 
 #### JSON mode
 
-Enable JSON mode by setting the `format` parameter to `json`. This will structure the response as a valid JSON object. See the JSON mode [example](#generate-request-json-mode) below.
+Enable JSON mode by setting the `format` parameter to `json`. This will structure the response as a valid JSON object. See the JSON mode [example](#request-json-mode) below.
 
 > Note: it's important to instruct the model to use JSON in the `prompt`. Otherwise, the model may generate large amounts whitespace.
 
@@ -90,7 +90,7 @@ The final response in the stream also includes additional data about the generat
 - `load_duration`: time spent in nanoseconds loading the model
 - `prompt_eval_count`: number of tokens in the prompt
 - `prompt_eval_duration`: time spent in nanoseconds evaluating the prompt
-- `eval_count`: number of tokens the response
+- `eval_count`: number of tokens in the response
 - `eval_duration`: time in nanoseconds spent generating the response
 - `context`: an encoding of the conversation used in this response, this can be sent in the next request to keep a conversational memory
 - `response`: empty if the response was streamed, if not streamed, this will contain the full response
@@ -256,9 +256,9 @@ For reproducible outputs, set `temperature` to 0 and `seed` to a number:
 ```shell
 curl http://localhost:11434/api/generate -d '{
   "model": "mistral",
-  "prompt": "[INST] why is the sky blue? [/INST]",
+  "prompt": "Why is the sky blue?",
   "options": {
-    "seed": 101,
+    "seed": 123,
     "temperature": 0
   }
 }'
@@ -394,7 +394,6 @@ Advanced parameters (optional):
 
 - `format`: the format to return a response in. Currently the only accepted value is `json`
 - `options`: additional model parameters listed in the documentation for the [Modelfile](./modelfile.md#valid-parameters-and-values) such as `temperature`
-- `template`: the prompt template to use (overrides what is defined in the `Modelfile`)
 - `stream`: if `false` the response will be returned as a single response object, rather than a stream of objects
 - `keep_alive`: controls how long the model will stay loaded into memory following the request (default: `5m`)
 
@@ -1024,7 +1023,7 @@ Advanced parameters:
 
 ```shell
 curl http://localhost:11434/api/embeddings -d '{
-  "model": "llama2",
+  "model": "all-minilm",
   "prompt": "Here is an article about llamas..."
 }'
 ```

@@ -67,6 +67,19 @@ You can see what features your CPU has with the following.
 cat /proc/cpuinfo| grep flags  | head -1
 ```
 
-## Known issues
+## Installing older or pre-release versions on Linux
 
-* N/A
+If you run into problems on Linux and want to install an older version, or you'd
+like to try out a pre-release before it's officially released, you can tell the
+install script which version to install.
+
+```sh
+curl -fsSL https://ollama.com/install.sh | OLLAMA_VERSION="0.1.29" sh
+```
+
+## Linux tmp noexec 
+
+If your system is configured with the "noexec" flag where Ollama stores its
+temporary executable files, you can specify an alternate location by setting
+OLLAMA_TMPDIR to a location writable by the user ollama runs as.  For example
+OLLAMA_TMPDIR=/usr/share/ollama/

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
@@ -29,12 +31,12 @@ import (
 	"golang.org/x/exp/slices"
 	"golang.org/x/term"
 
-	"github.com/jmorganca/ollama/api"
-	"github.com/jmorganca/ollama/format"
-	"github.com/jmorganca/ollama/parser"
-	"github.com/jmorganca/ollama/progress"
-	"github.com/jmorganca/ollama/server"
-	"github.com/jmorganca/ollama/version"
+	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/format"
+	"github.com/ollama/ollama/parser"
+	"github.com/ollama/ollama/progress"
+	"github.com/ollama/ollama/server"
+	"github.com/ollama/ollama/version"
 )
 
 func CreateHandler(cmd *cobra.Command, args []string) error {
@@ -51,8 +53,6 @@ func CreateHandler(cmd *cobra.Command, args []string) error {
 
 	p := progress.NewProgress(os.Stderr)
 	defer p.Stop()
-
-	bars := make(map[string]*progress.Bar)
 
 	modelfile, err := os.ReadFile(filename)
 	if err != nil {
@@ -87,29 +87,41 @@ func CreateHandler(cmd *cobra.Command, args []string) error {
 				path = filepath.Join(filepath.Dir(filename), path)
 			}
 
-			bin, err := os.Open(path)
+			fi, err := os.Stat(path)
 			if errors.Is(err, os.ErrNotExist) && c.Name == "model" {
 				continue
 			} else if err != nil {
 				return err
 			}
-			defer bin.Close()
 
-			hash := sha256.New()
-			if _, err := io.Copy(hash, bin); err != nil {
+			if fi.IsDir() {
+				// this is likely a safetensors or pytorch directory
+				// TODO make this work w/ adapters
+				tempfile, err := tempZipFiles(path)
+				if err != nil {
+					return err
+				}
+				defer os.RemoveAll(tempfile)
+
+				path = tempfile
+			}
+
+			digest, err := createBlob(cmd, client, path)
+			if err != nil {
 				return err
 			}
-			bin.Seek(0, io.SeekStart)
 
-			digest := fmt.Sprintf("sha256:%x", hash.Sum(nil))
-			if err = client.CreateBlob(cmd.Context(), digest, bin); err != nil {
-				return err
+			name := c.Name
+			if c.Name == "model" {
+				name = "from"
 			}
 
-			modelfile = bytes.ReplaceAll(modelfile, []byte(c.Args), []byte("@"+digest))
+			re := regexp.MustCompile(fmt.Sprintf(`(?im)^(%s)\s+%s\s*$`, name, c.Args))
+			modelfile = re.ReplaceAll(modelfile, []byte("$1 @"+digest))
 		}
 	}
 
+	bars := make(map[string]*progress.Bar)
 	fn := func(resp api.ProgressResponse) error {
 		if resp.Digest != "" {
 			spinner.Stop()
@@ -133,12 +145,145 @@ func CreateHandler(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	request := api.CreateRequest{Name: args[0], Modelfile: string(modelfile)}
+	quantization, _ := cmd.Flags().GetString("quantization")
+
+	request := api.CreateRequest{Name: args[0], Modelfile: string(modelfile), Quantization: quantization}
 	if err := client.Create(cmd.Context(), &request, fn); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func tempZipFiles(path string) (string, error) {
+	tempfile, err := os.CreateTemp("", "ollama-tf")
+	if err != nil {
+		return "", err
+	}
+	defer tempfile.Close()
+
+	zipfile := zip.NewWriter(tempfile)
+	defer zipfile.Close()
+
+	detectContentType := func(path string) (string, error) {
+		f, err := os.Open(path)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+
+		var b bytes.Buffer
+		b.Grow(512)
+
+		if _, err := io.CopyN(&b, f, 512); err != nil && !errors.Is(err, io.EOF) {
+			return "", err
+		}
+
+		contentType, _, _ := strings.Cut(http.DetectContentType(b.Bytes()), ";")
+		return contentType, nil
+	}
+
+	glob := func(pattern, contentType string) ([]string, error) {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, safetensor := range matches {
+			if ct, err := detectContentType(safetensor); err != nil {
+				return nil, err
+			} else if ct != contentType {
+				return nil, fmt.Errorf("invalid content type: expected %s for %s", ct, safetensor)
+			}
+		}
+
+		return matches, nil
+	}
+
+	var files []string
+	if st, _ := glob(filepath.Join(path, "model*.safetensors"), "application/octet-stream"); len(st) > 0 {
+		// safetensors files might be unresolved git lfs references; skip if they are
+		// covers model-x-of-y.safetensors, model.fp32-x-of-y.safetensors, model.safetensors
+		files = append(files, st...)
+	} else if pt, _ := glob(filepath.Join(path, "pytorch_model*.bin"), "application/zip"); len(pt) > 0 {
+		// pytorch files might also be unresolved git lfs references; skip if they are
+		// covers pytorch_model-x-of-y.bin, pytorch_model.fp32-x-of-y.bin, pytorch_model.bin
+		files = append(files, pt...)
+	} else if pt, _ := glob(filepath.Join(path, "consolidated*.pth"), "application/octet-stream"); len(pt) > 0 {
+		// pytorch files might also be unresolved git lfs references; skip if they are
+		// covers consolidated.x.pth, consolidated.pth
+		files = append(files, pt...)
+	} else {
+		return "", errors.New("no safetensors or torch files found")
+	}
+
+	// add configuration files, json files are detected as text/plain
+	js, err := glob(filepath.Join(path, "*.json"), "text/plain")
+	if err != nil {
+		return "", err
+	}
+	files = append(files, js...)
+
+	if tks, _ := glob(filepath.Join(path, "tokenizer.model"), "application/octet-stream"); len(tks) > 0 {
+		// add tokenizer.model if it exists, tokenizer.json is automatically picked up by the previous glob
+		// tokenizer.model might be a unresolved git lfs reference; error if it is
+		files = append(files, tks...)
+	} else if tks, _ := glob(filepath.Join(path, "**/tokenizer.model"), "text/plain"); len(tks) > 0 {
+		// some times tokenizer.model is in a subdirectory (e.g. meta-llama/Meta-Llama-3-8B)
+		files = append(files, tks...)
+	}
+
+	for _, file := range files {
+		f, err := os.Open(file)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+
+		fi, err := f.Stat()
+		if err != nil {
+			return "", err
+		}
+
+		zfi, err := zip.FileInfoHeader(fi)
+		if err != nil {
+			return "", err
+		}
+
+		zf, err := zipfile.CreateHeader(zfi)
+		if err != nil {
+			return "", err
+		}
+
+		if _, err := io.Copy(zf, f); err != nil {
+			return "", err
+		}
+	}
+
+	return tempfile.Name(), nil
+}
+
+func createBlob(cmd *cobra.Command, client *api.Client, path string) (string, error) {
+	bin, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer bin.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, bin); err != nil {
+		return "", err
+	}
+
+	if _, err := bin.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+
+	digest := fmt.Sprintf("sha256:%x", hash.Sum(nil))
+	if err = client.CreateBlob(cmd.Context(), digest, bin); err != nil {
+		return "", err
+	}
+	return digest, nil
 }
 
 func RunHandler(cmd *cobra.Command, args []string) error {
@@ -806,13 +951,20 @@ func versionHandler(cmd *cobra.Command, _ []string) {
 	}
 }
 
+func appendHostEnvDocs(cmd *cobra.Command) {
+	const hostEnvDocs = `
+Environment Variables:
+      OLLAMA_HOST        The host:port or base URL of the Ollama server (e.g. http://localhost:11434)
+`
+	cmd.SetUsageTemplate(cmd.UsageTemplate() + hostEnvDocs)
+}
+
 func NewCLI() *cobra.Command {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	cobra.EnableCommandSorting = false
 
 	if runtime.GOOS == "windows" {
-		// Enable colorful ANSI escape code in Windows terminal (disabled by default)
-		console.ConsoleFromFile(os.Stdout) //nolint:errcheck
+		console.ConsoleFromFile(os.Stdin) //nolint:errcheck
 	}
 
 	rootCmd := &cobra.Command{
@@ -844,6 +996,7 @@ func NewCLI() *cobra.Command {
 	}
 
 	createCmd.Flags().StringP("file", "f", "Modelfile", "Name of the Modelfile (default \"Modelfile\")")
+	createCmd.Flags().StringP("quantization", "q", "", "Quantization level.")
 
 	showCmd := &cobra.Command{
 		Use:     "show MODEL",
@@ -871,7 +1024,6 @@ func NewCLI() *cobra.Command {
 	runCmd.Flags().Bool("insecure", false, "Use an insecure registry")
 	runCmd.Flags().Bool("nowordwrap", false, "Don't wrap words to the next line automatically")
 	runCmd.Flags().String("format", "", "Response format (e.g. json)")
-
 	serveCmd := &cobra.Command{
 		Use:     "serve",
 		Aliases: []string{"start"},
@@ -879,6 +1031,15 @@ func NewCLI() *cobra.Command {
 		Args:    cobra.ExactArgs(0),
 		RunE:    RunServer,
 	}
+	serveCmd.SetUsageTemplate(serveCmd.UsageTemplate() + `
+Environment Variables:
+
+    OLLAMA_HOST         The host:port to bind to (default "127.0.0.1:11434")
+    OLLAMA_ORIGINS      A comma separated list of allowed origins.
+    OLLAMA_MODELS       The path to the models directory (default is "~/.ollama/models")
+    OLLAMA_KEEP_ALIVE   The duration that models stay loaded in memory (default is "5m")
+    OLLAMA_DEBUG        Set to 1 to enable additional debug logging
+`)
 
 	pullCmd := &cobra.Command{
 		Use:     "pull MODEL",
@@ -907,7 +1068,6 @@ func NewCLI() *cobra.Command {
 		PreRunE: checkServerHeartbeat,
 		RunE:    ListHandler,
 	}
-
 	copyCmd := &cobra.Command{
 		Use:     "cp SOURCE TARGET",
 		Short:   "Copy a model",
@@ -922,6 +1082,19 @@ func NewCLI() *cobra.Command {
 		Args:    cobra.MinimumNArgs(1),
 		PreRunE: checkServerHeartbeat,
 		RunE:    DeleteHandler,
+	}
+
+	for _, cmd := range []*cobra.Command{
+		createCmd,
+		showCmd,
+		runCmd,
+		pullCmd,
+		pushCmd,
+		listCmd,
+		copyCmd,
+		deleteCmd,
+	} {
+		appendHostEnvDocs(cmd)
 	}
 
 	rootCmd.AddCommand(

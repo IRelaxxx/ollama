@@ -1,6 +1,7 @@
 package server
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"log/slog"
 	"net/http"
@@ -22,10 +24,13 @@ import (
 
 	"golang.org/x/exp/slices"
 
-	"github.com/jmorganca/ollama/api"
-	"github.com/jmorganca/ollama/llm"
-	"github.com/jmorganca/ollama/parser"
-	"github.com/jmorganca/ollama/version"
+	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/convert"
+	"github.com/ollama/ollama/format"
+	"github.com/ollama/ollama/llm"
+	"github.com/ollama/ollama/parser"
+	"github.com/ollama/ollama/types/model"
+	"github.com/ollama/ollama/version"
 )
 
 type registryOptions struct {
@@ -280,7 +285,7 @@ func realpath(mfDir, from string) string {
 	return abspath
 }
 
-func CreateModel(ctx context.Context, name, modelFileDir string, commands []parser.Command, fn func(resp api.ProgressResponse)) error {
+func CreateModel(ctx context.Context, name, modelFileDir, quantization string, commands []parser.Command, fn func(resp api.ProgressResponse)) error {
 	deleteMap := make(map[string]struct{})
 	if manifest, _, err := GetManifest(ParseModelPath(name)); err == nil {
 		for _, layer := range append(manifest.Layers, manifest.Config) {
@@ -316,7 +321,47 @@ func CreateModel(ctx context.Context, name, modelFileDir string, commands []pars
 				c.Args = blobPath
 			}
 
-			bin, err := os.Open(realpath(modelFileDir, c.Args))
+			pathName := realpath(modelFileDir, c.Args)
+
+			ggufName, err := convertModel(name, pathName, fn)
+			if err != nil {
+				var pathErr *fs.PathError
+				switch {
+				case errors.Is(err, zip.ErrFormat):
+					// it's not a safetensor archive
+				case errors.As(err, &pathErr):
+					// it's not a file on disk, could be a model reference
+				default:
+					return err
+				}
+			}
+
+			if ggufName != "" {
+				pathName = ggufName
+				defer os.RemoveAll(ggufName)
+
+				if quantization != "" {
+					quantization = strings.ToUpper(quantization)
+					fn(api.ProgressResponse{Status: fmt.Sprintf("quantizing %s model to %s", "F16", quantization)})
+					tempfile, err := os.CreateTemp(filepath.Dir(ggufName), quantization)
+					if err != nil {
+						return err
+					}
+					defer os.RemoveAll(tempfile.Name())
+
+					if err := llm.Quantize(ggufName, tempfile.Name(), quantization); err != nil {
+						return err
+					}
+
+					if err := tempfile.Close(); err != nil {
+						return err
+					}
+
+					pathName = tempfile.Name()
+				}
+			}
+
+			bin, err := os.Open(pathName)
 			if err != nil {
 				// not a file on disk so must be a model reference
 				modelpath := ParseModelPath(c.Args)
@@ -396,34 +441,32 @@ func CreateModel(ctx context.Context, name, modelFileDir string, commands []pars
 			defer bin.Close()
 
 			var offset int64
-		CREATE:
 			for {
 				fn(api.ProgressResponse{Status: "creating model layer"})
+				if _, err := bin.Seek(offset, io.SeekStart); err != nil {
+					return err
+				}
 
-				bin.Seek(offset, io.SeekStart)
-				ggml, err := llm.DecodeGGML(bin)
-				if err != nil {
-					switch {
-					case errors.Is(err, io.EOF):
-						break CREATE
-					case errors.Is(err, llm.ErrUnsupportedFormat):
-						return fmt.Errorf("model binary specified in FROM field is not a valid gguf format model, %w", err)
-					default:
-						return err
-					}
+				ggml, size, err := llm.DecodeGGML(bin)
+				if errors.Is(err, io.EOF) {
+					break
+				} else if errors.Is(err, llm.ErrUnsupportedFormat) {
+					return fmt.Errorf("model binary specified in FROM field is not a valid gguf format model, %w", err)
+				} else if err != nil {
+					return err
 				}
 
 				config.SetModelFormat(ggml.Name())
-				config.SetModelFamily(ggml.ModelFamily())
-				config.SetModelType(ggml.ModelType())
-				config.SetFileType(ggml.FileType())
+				config.SetModelFamily(ggml.KV().Architecture())
+				config.SetModelType(format.HumanNumber(ggml.KV().ParameterCount()))
+				config.SetFileType(ggml.KV().FileType())
 
 				mediatype := mediatype
-				if ggml.ModelFamily() == "clip" {
+				if ggml.KV().Architecture() == "clip" {
 					mediatype = "application/vnd.ollama.image.projector"
 				}
 
-				sr := io.NewSectionReader(bin, offset, ggml.Size)
+				sr := io.NewSectionReader(bin, offset, size)
 				layer, err := NewLayer(sr, mediatype)
 				if err != nil {
 					return err
@@ -431,7 +474,7 @@ func CreateModel(ctx context.Context, name, modelFileDir string, commands []pars
 
 				layers.Add(layer)
 
-				offset += ggml.Size
+				offset += size
 			}
 		case "adapter":
 			if strings.HasPrefix(c.Args, "@") {
@@ -450,7 +493,13 @@ func CreateModel(ctx context.Context, name, modelFileDir string, commands []pars
 			}
 			defer bin.Close()
 
-			layer, err := NewLayer(bin, mediatype)
+			_, size, err := llm.DecodeGGML(bin)
+			if err != nil {
+				return err
+			}
+
+			sr := io.NewSectionReader(bin, 0, size)
+			layer, err := NewLayer(sr, mediatype)
 			if err != nil {
 				return err
 			}
@@ -521,13 +570,6 @@ func CreateModel(ctx context.Context, name, modelFileDir string, commands []pars
 			}
 		}
 
-		// xxx - can this be removed?
-		if config.ModelType == "65B" {
-			if gqa, ok := formattedParams["gqa"].(int); ok && gqa == 8 {
-				config.ModelType = "70B"
-			}
-		}
-
 		var b bytes.Buffer
 		if err := json.NewEncoder(&b).Encode(formattedParams); err != nil {
 			return err
@@ -592,36 +634,107 @@ func CreateModel(ctx context.Context, name, modelFileDir string, commands []pars
 	return nil
 }
 
-func CopyModel(src, dest string) error {
-	srcModelPath := ParseModelPath(src)
-	srcPath, err := srcModelPath.GetManifestPath()
+func convertModel(name, path string, fn func(resp api.ProgressResponse)) (string, error) {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+
+	tempDir, err := os.MkdirTemp("", "ollama-convert")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tempDir)
+
+	fn(api.ProgressResponse{Status: "unpacking model metadata"})
+	for _, f := range r.File {
+		fpath := filepath.Join(tempDir, f.Name)
+		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
+		if err != nil {
+			return "", err
+		}
+
+		rc, err := f.Open()
+		if err != nil {
+			return "", err
+		}
+
+		_, err = io.Copy(outFile, rc)
+		if err != nil {
+			return "", err
+		}
+
+		outFile.Close()
+		rc.Close()
+	}
+
+	mf, err := convert.GetModelFormat(tempDir)
+	if err != nil {
+		return "", err
+	}
+
+	params, err := mf.GetParams(tempDir)
+	if err != nil {
+		return "", err
+	}
+
+	mArch, err := mf.GetModelArch(name, tempDir, params)
+	if err != nil {
+		return "", err
+	}
+
+	fn(api.ProgressResponse{Status: "processing tensors"})
+	if err := mArch.GetTensors(); err != nil {
+		return "", err
+	}
+
+	if err := mArch.LoadVocab(); err != nil {
+		return "", err
+	}
+
+	fn(api.ProgressResponse{Status: "converting model"})
+	path, err = mArch.WriteGGUF()
+	if err != nil {
+		return "", err
+	}
+
+	return path, nil
+}
+
+func CopyModel(src, dst model.Name) error {
+	if !dst.IsFullyQualified() {
+		return model.Unqualified(dst)
+	}
+	if !src.IsFullyQualified() {
+		return model.Unqualified(src)
+	}
+
+	manifests, err := GetManifestPath()
 	if err != nil {
 		return err
 	}
 
-	destModelPath := ParseModelPath(dest)
-	destPath, err := destModelPath.GetManifestPath()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+	dstpath := filepath.Join(manifests, dst.Filepath())
+	if err := os.MkdirAll(filepath.Dir(dstpath), 0o755); err != nil {
 		return err
 	}
 
-	// copy the file
-	input, err := os.ReadFile(srcPath)
+	srcpath := filepath.Join(manifests, src.Filepath())
+	srcfile, err := os.Open(srcpath)
 	if err != nil {
-		fmt.Println("Error reading file:", err)
 		return err
 	}
+	defer srcfile.Close()
 
-	err = os.WriteFile(destPath, input, 0o644)
+	dstfile, err := os.Create(dstpath)
 	if err != nil {
-		fmt.Println("Error reading file:", err)
 		return err
 	}
+	defer dstfile.Close()
 
-	return nil
+	_, err = io.Copy(dstfile, srcfile)
+	return err
 }
 
 func deleteUnusedLayers(skipModelPath *ModelPath, deleteMap map[string]struct{}, dryRun bool) error {
@@ -699,9 +812,7 @@ func PruneLayers() error {
 
 	for _, blob := range blobs {
 		name := blob.Name()
-		if runtime.GOOS == "windows" {
-			name = strings.ReplaceAll(name, "-", ":")
-		}
+		name = strings.ReplaceAll(name, "-", ":")
 		if strings.HasPrefix(name, "sha256:") {
 			deleteMap[name] = struct{}{}
 		}
@@ -1030,7 +1141,7 @@ func GetSHA256Digest(r io.Reader) (string, int64) {
 	return fmt.Sprintf("sha256:%x", h.Sum(nil)), n
 }
 
-var errUnauthorized = fmt.Errorf("unauthorized")
+var errUnauthorized = errors.New("unauthorized")
 
 func makeRequestWithRetry(ctx context.Context, method string, requestURL *url.URL, headers http.Header, body io.ReadSeeker, regOpts *registryOptions) (*http.Response, error) {
 	for i := 0; i < 2; i++ {
@@ -1148,7 +1259,7 @@ func parseRegistryChallenge(authStr string) registryChallenge {
 	}
 }
 
-var errDigestMismatch = fmt.Errorf("digest mismatch, file must be downloaded again")
+var errDigestMismatch = errors.New("digest mismatch, file must be downloaded again")
 
 func verifyBlob(digest string) error {
 	fp, err := GetBlobsPath(digest)

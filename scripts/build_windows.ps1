@@ -13,10 +13,24 @@ function checkEnv() {
         $MSVC_INSTALL=(Get-CimInstance MSFT_VSInstance -Namespace root/cimv2/vs)[0].InstallLocation
         $env:VCToolsRedistDir=(get-item "${MSVC_INSTALL}\VC\Redist\MSVC\*")[0]
     }
-    $script:NVIDIA_DIR=(get-item "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin\")[0]
+    # Try to find the CUDA dir
+    if ($null -eq $env:NVIDIA_DIR) {
+        $d=(get-command -ea 'silentlycontinue' nvcc).path
+        if ($d -ne $null) {
+            $script:NVIDIA_DIR=($d| split-path -parent)
+        } else {
+            $cudaList=(get-item "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin\" -ea 'silentlycontinue')
+            if ($cudaList.length > 0) {
+                $script:NVIDIA_DIR=$cudaList[0]
+            }
+        }
+    } else {
+        $script:NVIDIA_DIR=$env:NVIDIA_DIR
+    }
+    
     $script:INNO_SETUP_DIR=(get-item "C:\Program Files*\Inno Setup*\")[0]
 
-    $script:DEPS_DIR="${script:SRC_DIR}\dist\windeps"
+    $script:DEPS_DIR="${script:SRC_DIR}\dist\windows-amd64"
     $env:CGO_ENABLED="1"
     echo "Checking version"
     if (!$env:VERSION) {
@@ -28,20 +42,23 @@ function checkEnv() {
     } else {
         $script:VERSION=$env:VERSION
     }
-    $pattern = "(\d+[.]\d+[.]\d+)-(\d+)-"
+    $pattern = "(\d+[.]\d+[.]\d+).*"
     if ($script:VERSION -match $pattern) {
-        $script:PKG_VERSION=$matches[1] + "." + $matches[2]
+        $script:PKG_VERSION=$matches[1]
     } else {
-        $script:PKG_VERSION=$script:VERSION
+        $script:PKG_VERSION="0.0.0"
     }
     write-host "Building Ollama $script:VERSION with package version $script:PKG_VERSION"
 
-    # Check for signing key
+    # Note: Windows Kits 10 signtool crashes with GCP's plugin
+    if ($null -eq $env:SIGN_TOOL) {
+        ${script:SignTool}="C:\Program Files (x86)\Windows Kits\8.1\bin\x64\signtool.exe"
+    } else {
+        ${script:SignTool}=${env:SIGN_TOOL}
+    }
     if ("${env:KEY_CONTAINER}") {
         ${script:OLLAMA_CERT}=$(resolve-path "${script:SRC_DIR}\ollama_inc.crt")
         Write-host "Code signing enabled"
-        # Note: 10 Windows Kit signtool crashes with GCP's plugin
-        ${script:SignTool}="C:\Program Files (x86)\Windows Kits\8.1\bin\x64\signtool.exe"
     } else {
         write-host "Code signing disabled - please set KEY_CONTAINERS to sign and copy ollama_inc.crt to the top of the source tree"
     }
@@ -51,24 +68,28 @@ function checkEnv() {
 
 function buildOllama() {
     write-host "Building ollama CLI"
-    & go generate ./...
-    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
-    & go build -ldflags "-s -w -X=github.com/jmorganca/ollama/version.Version=$script:VERSION -X=github.com/jmorganca/ollama/server.mode=release" .
+    if ($null -eq ${env:OLLAMA_SKIP_GENERATE}) {
+        & go generate ./...
+        if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}    
+    } else {
+        write-host "Skipping generate step with OLLAMA_SKIP_GENERATE set"
+    }
+    & go build -trimpath -ldflags "-s -w -X=github.com/ollama/ollama/version.Version=$script:VERSION -X=github.com/ollama/ollama/server.mode=release" .
     if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
     if ("${env:KEY_CONTAINER}") {
         & "${script:SignTool}" sign /v /fd sha256 /t http://timestamp.digicert.com /f "${script:OLLAMA_CERT}" `
             /csp "Google Cloud KMS Provider" /kc ${env:KEY_CONTAINER} ollama.exe
         if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
     }
-    New-Item -ItemType Directory -Path .\dist -Force
-    cp .\ollama.exe .\dist\ollama-windows-amd64.exe
+    New-Item -ItemType Directory -Path .\dist\windows-amd64\ -Force
+    cp .\ollama.exe .\dist\windows-amd64\
 }
 
 function buildApp() {
     write-host "Building Ollama App"
     cd "${script:SRC_DIR}\app"
     & windres -l 0 -o ollama.syso ollama.rc
-    & go build -ldflags "-s -w -H windowsgui -X=github.com/jmorganca/ollama/version.Version=$script:VERSION -X=github.com/jmorganca/ollama/server.mode=release" .
+    & go build -trimpath -ldflags "-s -w -H windowsgui -X=github.com/ollama/ollama/version.Version=$script:VERSION -X=github.com/ollama/ollama/server.mode=release" .
     if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
     if ("${env:KEY_CONTAINER}") {
         & "${script:SignTool}" sign /v /fd sha256 /t http://timestamp.digicert.com /f "${script:OLLAMA_CERT}" `
@@ -80,7 +101,6 @@ function buildApp() {
 function gatherDependencies() {
     write-host "Gathering runtime dependencies"
     cd "${script:SRC_DIR}"
-    rm -ea 0 -recurse -force -path "${script:DEPS_DIR}"
     md "${script:DEPS_DIR}" -ea 0 > $null
 
     # TODO - this varies based on host build system and MSVC version - drive from dumpbin output
@@ -89,9 +109,6 @@ function gatherDependencies() {
     cp "${env:VCToolsRedistDir}\x64\Microsoft.VC*.CRT\vcruntime140.dll" "${script:DEPS_DIR}\"
     cp "${env:VCToolsRedistDir}\x64\Microsoft.VC*.CRT\vcruntime140_1.dll" "${script:DEPS_DIR}\"
 
-    cp "${script:NVIDIA_DIR}\cudart64_*.dll" "${script:DEPS_DIR}\"
-    cp "${script:NVIDIA_DIR}\cublas64_*.dll" "${script:DEPS_DIR}\"
-    cp "${script:NVIDIA_DIR}\cublasLt64_*.dll" "${script:DEPS_DIR}\"
 
     cp "${script:SRC_DIR}\app\ollama_welcome.ps1" "${script:SRC_DIR}\dist\"
     if ("${env:KEY_CONTAINER}") {
@@ -103,7 +120,6 @@ function gatherDependencies() {
             if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
         }
     }
-
 }
 
 function buildInstaller() {
@@ -118,12 +134,18 @@ function buildInstaller() {
     if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
 }
 
+function distZip() {
+    write-host "Generating stand-alone distribution zip file ${script:SRC_DIR}\dist\ollama-windows-amd64.zip"
+    Compress-Archive -Path "${script:SRC_DIR}\dist\windows-amd64\*" -DestinationPath "${script:SRC_DIR}\dist\ollama-windows-amd64.zip" -Force
+}
+
 try {
     checkEnv
     buildOllama
     buildApp
     gatherDependencies
     buildInstaller
+    distZip
 } catch {
     write-host "Build Failed"
     write-host $_
