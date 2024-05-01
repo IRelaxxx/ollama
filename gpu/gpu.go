@@ -203,7 +203,7 @@ func GetGPUInfo() GpuInfoList {
 			gpuInfo.TotalMemory = uint64(memInfo.total)
 			gpuInfo.FreeMemory = uint64(memInfo.free)
 			// higher numbers time out on my machine
-			gpuInfo.FreeMemory = uint64(4295000000)
+			//gpuInfo.FreeMemory = uint64(3221000000)
 			//gpuInfo.ID = C.GoString(&memInfo.gpu_id[0])
 			//gpuInfo.Major = int(memInfo.major)
 			//gpuInfo.Minor = int(memInfo.minor)
