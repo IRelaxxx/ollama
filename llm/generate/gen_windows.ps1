@@ -1,7 +1,5 @@
 #!powershell
 
-$ErrorActionPreference = "Stop"
-
 function amdGPUs {
     if ($env:AMDGPU_TARGETS) {
         return $env:AMDGPU_TARGETS
@@ -42,7 +40,7 @@ function init_vars {
         "-DLLAMA_NATIVE=off"
         )
     $script:commonCpuDefs = @("-DCMAKE_POSITION_INDEPENDENT_CODE=on")
-    $script:ARCH = "amd64" # arm not yet supported.
+    $script:ARCH = $Env:PROCESSOR_ARCHITECTURE.ToLower()
     $script:DIST_BASE = "${script:SRC_DIR}\dist\windows-${script:ARCH}\ollama_runners"
     md "$script:DIST_BASE" -ea 0 > $null
     if ($env:CGO_CFLAGS -contains "-g") {
@@ -85,9 +83,9 @@ function init_vars {
 function git_module_setup {
     # TODO add flags to skip the init/patch logic to make it easier to mod llama.cpp code in-repo
     & git submodule init
-    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+    if ($LASTEXITCODE -ne 0) { throw($LASTEXITCODE)}
     & git submodule update --force "${script:llamacppDir}"
-    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+    if ($LASTEXITCODE -ne 0) { throw($LASTEXITCODE)}
 }
 
 function apply_patches {
@@ -121,10 +119,15 @@ function build {
     write-host "generating config with: cmake -S ${script:llamacppDir} -B $script:buildDir $script:cmakeDefs"
     & cmake --version
     & cmake -S "${script:llamacppDir}" -B $script:buildDir $script:cmakeDefs
-    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
-    write-host "building with: cmake --build $script:buildDir --config $script:config $($script:cmakeTargets | ForEach-Object { `"--target`", $_ })"
-    & cmake --build $script:buildDir --config $script:config ($script:cmakeTargets | ForEach-Object { "--target", $_ })
-    if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+    if ($LASTEXITCODE -ne 0) { throw($LASTEXITCODE)}
+    if ($cmakeDefs -contains "-G") {
+        $extra=@("-j8")
+    } else {
+        $extra= @("--", "/p:CL_MPcount=8")
+    }
+    write-host "building with: cmake --build $script:buildDir --config $script:config $($script:cmakeTargets | ForEach-Object { `"--target`", $_ }) $extra"
+    & cmake --build $script:buildDir --config $script:config ($script:cmakeTargets | ForEach-Object { "--target", $_ }) $extra
+    if ($LASTEXITCODE -ne 0) { write-host "cmake build exit status $LASTEXITCODE"; throw($LASTEXITCODE)}
     # Rearrange output to be consistent between different generators
     if ($null -ne ${script:config} -And (test-path -path "${script:buildDir}/bin/${script:config}" ) ) {
         mv -force "${script:buildDir}/bin/${script:config}/*" "${script:buildDir}/bin/"
@@ -138,7 +141,7 @@ function sign {
         foreach ($file in @(get-childitem "${script:buildDir}/bin/*.exe") + @(get-childitem "${script:buildDir}/bin/*.dll")){
             & "${script:SignTool}" sign /v /fd sha256 /t http://timestamp.digicert.com /f "${script:OLLAMA_CERT}" `
                 /csp "Google Cloud KMS Provider" /kc "${env:KEY_CONTAINER}" $file
-            if ($LASTEXITCODE -ne 0) { exit($LASTEXITCODE)}
+            if ($LASTEXITCODE -ne 0) { throw($LASTEXITCODE)}
         }
     }
 }
@@ -230,10 +233,16 @@ function build_vulkan() {
 }
 
 function build_cpu() {
+    if ($script:ARCH -eq "arm64") {
+        $gen_arch = "ARM64"
+    } else { # amd64
+        $gen_arch = "x64"
+    }
+
     if ((-not "${env:OLLAMA_SKIP_CPU_GENERATE}" ) -and ((-not "${env:OLLAMA_CPU_TARGET}") -or ("${env:OLLAMA_CPU_TARGET}" -eq "cpu"))) {
         # remaining llama.cpp builds use MSVC 
         init_vars
-        $script:cmakeDefs = $script:commonCpuDefs + @("-A", "x64", "-DLLAMA_AVX=off", "-DLLAMA_AVX2=off", "-DLLAMA_AVX512=off", "-DLLAMA_FMA=off", "-DLLAMA_F16C=off") + $script:cmakeDefs
+        $script:cmakeDefs = $script:commonCpuDefs + @("-A", $gen_arch, "-DLLAMA_AVX=off", "-DLLAMA_AVX2=off", "-DLLAMA_AVX512=off", "-DLLAMA_FMA=off", "-DLLAMA_F16C=off") + $script:cmakeDefs
         $script:buildDir="../build/windows/${script:ARCH}/cpu"
         $script:distDir="$script:DIST_BASE\cpu"
         write-host "Building LCD CPU"
@@ -286,7 +295,15 @@ function build_cuda() {
         init_vars
         $script:buildDir="../build/windows/${script:ARCH}/cuda$script:CUDA_VARIANT"
         $script:distDir="$script:DIST_BASE\cuda$script:CUDA_VARIANT"
-        $script:cmakeDefs += @("-A", "x64", "-DLLAMA_CUDA=ON", "-DLLAMA_AVX=on", "-DLLAMA_AVX2=off", "-DCUDAToolkit_INCLUDE_DIR=$script:CUDA_INCLUDE_DIR", "-DCMAKE_CUDA_ARCHITECTURES=${script:CMAKE_CUDA_ARCHITECTURES}")
+        $script:cmakeDefs += @(
+            "-A", "x64",
+            "-DLLAMA_CUDA=ON",
+            "-DLLAMA_AVX=on",
+            "-DLLAMA_AVX2=off",
+            "-DCUDAToolkit_INCLUDE_DIR=$script:CUDA_INCLUDE_DIR",
+            "-DCMAKE_CUDA_FLAGS=-t8"
+            "-DCMAKE_CUDA_ARCHITECTURES=${script:CMAKE_CUDA_ARCHITECTURES}"
+            )
         if ($null -ne $env:OLLAMA_CUSTOM_CUDA_DEFS) {
             write-host "OLLAMA_CUSTOM_CUDA_DEFS=`"${env:OLLAMA_CUSTOM_CUDA_DEFS}`""
             $script:cmakeDefs +=@("${env:OLLAMA_CUSTOM_CUDA_DEFS}")
@@ -303,6 +320,49 @@ function build_cuda() {
     } else {
         write-host "Skipping CUDA generation step"
     }
+}
+
+function build_oneapi() {
+  if ((-not "${env:OLLAMA_SKIP_ONEAPI_GENERATE}") -and ("${env:ONEAPI_ROOT}"))  {
+    # Get oneAPI version
+    $script:ONEAPI_VERSION = icpx --version
+    $script:ONEAPI_VERSION = [regex]::Match($script:ONEAPI_VERSION, '(?<=oneAPI DPC\+\+/C\+\+ Compiler )(?<version>\d+\.\d+\.\d+)').Value
+    if ($null -ne $script:ONEAPI_VERSION) {
+      $script:ONEAPI_VARIANT = "_v" + $script:ONEAPI_VERSION
+    }
+    init_vars
+    $script:buildDir = "../build/windows/${script:ARCH}/oneapi$script:ONEAPI_VARIANT"
+    $script:distDir ="$script:DIST_BASE\oneapi$script:ONEAPI_VARIANT"
+    $script:cmakeDefs += @(
+      "-G", "MinGW Makefiles",
+      "-DLLAMA_SYCL=ON",
+      "-DCMAKE_C_COMPILER=icx",
+      "-DCMAKE_CXX_COMPILER=icx",
+      "-DCMAKE_BUILD_TYPE=Release"
+    )
+
+    Write-Host "Building oneAPI"
+    build
+    # Ninja doesn't prefix with config name
+    if ($null -ne $script:DUMPBIN) {
+      & "$script:DUMPBIN" /dependents "${script:buildDir}/bin/ollama_llama_server.exe" | Select-String ".dll"
+    }
+    sign
+    install
+
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\libirngmd.dll" "${script:distDir}"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\libmmd.dll" "${script:distDir}"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\pi_level_zero.dll" "${script:distDir}"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\pi_unified_runtime.dll" "${script:distDir}"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\pi_win_proxy_loader.dll" "${script:distDir}"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\svml_dispmd.dll" "${script:distDir}"
+    cp "${env:ONEAPI_ROOT}\compiler\latest\bin\sycl7.dll" "${script:distDir}"
+    cp "${env:ONEAPI_ROOT}\mkl\latest\bin\mkl_core.2.dll" "${script:distDir}"
+    cp "${env:ONEAPI_ROOT}\mkl\latest\bin\mkl_sycl_blas.4.dll" "${script:distDir}"
+    cp "${env:ONEAPI_ROOT}\mkl\latest\bin\mkl_tbb_thread.2.dll" "${script:distDir}"
+  } else {
+    Write-Host "Skipping oneAPI generation step"
+  }
 }
 
 function build_rocm() {
@@ -364,13 +424,30 @@ init_vars
 if ($($args.count) -eq 0) {
     git_module_setup
     apply_patches
-    build_static
-    build_cpu
-    build_cpu_avx
-    build_cpu_avx2
-    build_vulkan
-    build_cuda
-    build_rocm
+
+    $tasks = @("build_static", "build_cpu")
+    $jobs = @()
+    if ($script:ARCH -ne "arm64") {
+        $tasks += $("build_cpu_avx", "build_cpu_avx2", "build_cuda", "build_oneapi", "build_rocm", "build_vulkan")
+    }
+    foreach ($t in $tasks) {
+        $jobs += @(Start-ThreadJob -ThrottleLimit 12 -FilePath .\gen_windows.ps1 -ArgumentList $t -Name $t)
+    }
+    get-job
+    foreach ($job in $jobs) {
+        write-host "----" $job.Name output follows
+        receive-job -wait -job $job
+        write-host "----" $job.Name $job.State
+        write-host ""
+        if ($job.State -contains 'Failed') {
+            cleanup
+            write-host "Terminating remaining jobs (this takes a while, you can ^C)"
+            # TODO find some way to kill the spawned cmake processes faster
+            remove-job -force -job $jobs
+            exit(-1)
+        }
+        get-job
+    }
 
     cleanup
     write-host "`ngo generate completed.  LLM runners: $(get-childitem -path $script:DIST_BASE)"

@@ -4,6 +4,7 @@ package llm
 // #cgo darwin,arm64 LDFLAGS: ${SRCDIR}/build/darwin/arm64_static/libllama.a -lstdc++
 // #cgo darwin,amd64 LDFLAGS: ${SRCDIR}/build/darwin/x86_64_static/libllama.a -lstdc++
 // #cgo windows,amd64 LDFLAGS: ${SRCDIR}/build/windows/amd64_static/libllama.a -static -lstdc++
+// #cgo windows,arm64 LDFLAGS: ${SRCDIR}/build/windows/arm64_static/libllama.a -static -lstdc++
 // #cgo linux,amd64 LDFLAGS: ${SRCDIR}/build/linux/x86_64_static/libllama.a -lstdc++
 // #cgo linux,arm64 LDFLAGS: ${SRCDIR}/build/linux/arm64_static/libllama.a -lstdc++
 // #include <stdlib.h>
@@ -19,7 +20,7 @@ func SystemInfo() string {
 	return C.GoString(C.llama_print_system_info())
 }
 
-func Quantize(infile, outfile, filetype string) error {
+func Quantize(infile, outfile string, ftype fileType) error {
 	cinfile := C.CString(infile)
 	defer C.free(unsafe.Pointer(cinfile))
 
@@ -28,101 +29,10 @@ func Quantize(infile, outfile, filetype string) error {
 
 	params := C.llama_model_quantize_default_params()
 	params.nthread = -1
+	params.ftype = ftype.Value()
 
-	switch filetype {
-	case "F32":
-		params.ftype = fileTypeF32
-	case "F16":
-		params.ftype = fileTypeF16
-	case "Q4_0":
-		params.ftype = fileTypeQ4_0
-	case "Q4_1":
-		params.ftype = fileTypeQ4_1
-	case "Q4_1_F16":
-		params.ftype = fileTypeQ4_1_F16
-	case "Q8_0":
-		params.ftype = fileTypeQ8_0
-	case "Q5_0":
-		params.ftype = fileTypeQ5_0
-	case "Q5_1":
-		params.ftype = fileTypeQ5_1
-	case "Q2_K":
-		params.ftype = fileTypeQ2_K
-	case "Q3_K_S":
-		params.ftype = fileTypeQ3_K_S
-	case "Q3_K_M":
-		params.ftype = fileTypeQ3_K_M
-	case "Q3_K_L":
-		params.ftype = fileTypeQ3_K_L
-	case "Q4_K_S":
-		params.ftype = fileTypeQ4_K_S
-	case "Q4_K_M":
-		params.ftype = fileTypeQ4_K_M
-	case "Q5_K_S":
-		params.ftype = fileTypeQ5_K_S
-	case "Q5_K_M":
-		params.ftype = fileTypeQ5_K_M
-	case "Q6_K":
-		params.ftype = fileTypeQ6_K
-	case "IQ2_XXS":
-		params.ftype = fileTypeIQ2_XXS
-	case "IQ2_XS":
-		params.ftype = fileTypeIQ2_XS
-	case "Q2_K_S":
-		params.ftype = fileTypeQ2_K_S
-	case "Q3_K_XS":
-		params.ftype = fileTypeQ3_K_XS
-	case "IQ3_XXS":
-		params.ftype = fileTypeIQ3_XXS
-	default:
-		/*if info.Library == "cpu" {
-			slog.Info("GPU not available, falling back to CPU")
-			opts.NumGPU = 0
-			break
-		}
-
-		// don't use GPU at all if no layers are loaded
-		if opts.NumGPU == 0 {
-			info.Library = "cpu"
-			info.Variant = gpu.GetCPUVariant()
-			break
-		}
-
-		// user-defined GPU count
-		if opts.NumGPU != -1 {
-			break
-		}
-
-		// the "main" GPU needs the most memory and determines the limit
-		// of how many layers can be loaded. It needs to fit:
-		// 1. the full compute graph allocation for all devices (graph)
-		// 2. the proportional kv cache for all devices (kv * % layers)
-		// 3. the proportional model (size * % layers / # devices)
-		// This estimates the number of layers
-		maxlayers := int64(ggml.NumLayers()) + 1
-		devices := int64(info.DeviceCount)
-		avg := vram / devices
-		layers := maxlayers * (avg - graph) / (kv + size/devices)
-		if layers > maxlayers {
-			layers = maxlayers
-		}
-
-		// 1 + 2 must fit on the main gpu
-		min := graph + kv*layers/maxlayers
-		if layers <= 0 || min > avg {
-			slog.Info("not enough vram available, falling back to CPU only")
-			info.Library = "cpu"
-			info.Variant = gpu.GetCPUVariant()
-			opts.NumGPU = 0
-			break
-		}
-		slog.Debug("gpu layer offload calculation", "min", min, "graph", graph, "kv", kv, "layers", layers, "maxLayers", maxlayers, "vram", vram, "avg", avg)
-		opts.NumGPU = int(layers)*/
-		return fmt.Errorf("unknown filetype: %s", filetype)
-	}
-
-	if retval := C.llama_model_quantize(cinfile, coutfile, &params); retval != 0 {
-		return fmt.Errorf("llama_model_quantize: %d", retval)
+	if rc := C.llama_model_quantize(cinfile, coutfile, &params); rc != 0 {
+		return fmt.Errorf("llama_model_quantize: %d", rc)
 	}
 
 	return nil
