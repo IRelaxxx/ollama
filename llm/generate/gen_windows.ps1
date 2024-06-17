@@ -220,7 +220,7 @@ function build_vulkan() {
     if ((-not "${env:OLLAMA_SKIP_VULKAN_GENERATE}" )) {
         # remaining llama.cpp builds use MSVC 
         init_vars
-        $script:cmakeDefs = $script:commonCpuDefs + @("-A", "x64", "-DLLAMA_VULKAN=on", "-DLLAMA_AVX=off", "-DLLAMA_AVX2=on", "-DLLAMA_AVX512=off", "-DLLAMA_FMA=off", "-DLLAMA_F16C=off") + $script:cmakeDefs
+        $script:cmakeDefs = $script:commonCpuDefs + @("-A", "x64", "-DLLAMA_VULKAN=on", "-DLLAMA_AVX=on", "-DLLAMA_AVX2=on", "-DLLAMA_AVX512=off", "-DLLAMA_FMA=on", "-DLLAMA_F16C=on") + $script:cmakeDefs
         $script:buildDir="../build/windows/${script:ARCH}/vulkan"
         $script:distDir="$script:DIST_BASE\vulkan"
         write-host "Building LCD Vulkan"

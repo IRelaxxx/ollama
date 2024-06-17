@@ -33,6 +33,7 @@ type cudaHandles struct {
 
 type vulkanHandles struct {
 	vulkan      *C.vulkan_handle_t
+	deviceCount int
 }
 
 type oneapiHandles struct {
@@ -56,10 +57,10 @@ var (
 	cudartLibPath string
 	oneapiLibPath string
 	nvmlLibPath   string
-	vulkanLibPath   string
+	vulkanLibPath string
 	rocmGPUs      []RocmGPUInfo
 	oneapiGPUs    []OneapiGPUInfo
-	vulkanGPUs []VulkanGPUInfo
+	vulkanGPUs    []VulkanGPUInfo
 )
 
 // With our current CUDA compile flags, older than 5.0 will not work properly
@@ -76,23 +77,24 @@ var CudaTegra string = os.Getenv("JETSON_JETPACK")
 
 func initVulkanHandles() *vulkanHandles {
 	vHandles := &vulkanHandles{}
-/*
-	if vulkanLibPath != "" {
-		vHandles.deviceCount, vHandles.vulkan, _ = LoadVulkanMgmt([]string{vulkanLibPath})
-		return vHandles
-	}*/
+	/*
+		if vulkanLibPath != "" {
+			vHandles.deviceCount, vHandles.vulkan, _ = LoadVulkanMgmt([]string{vulkanLibPath})
+			return vHandles
+		}*/
 
-	vulkanLibPaths := FindGPULibs(vulkanMgmtName, VulkanGlobs)
+	vulkanLibPaths := FindGPULibs(VulkanMgmtName, VulkanGlobs)
 	if len(vulkanLibPaths) > 0 {
 		deviceCount, vulkan, libPath := LoadVulkanMgmt(vulkanLibPaths)
 		if vulkan != nil {
 			slog.Info("Vulkan GPU detected")
 			vHandles.vulkan = vulkan
-			vHandles.deviceCount = 1
+			vHandles.deviceCount = deviceCount
 			vulkanLibPath = libPath
 			return vHandles
 		}
 	}
+	return nil
 }
 
 // Note: gpuMutex must already be held
@@ -114,7 +116,6 @@ func initCudaHandles() *cudaHandles {
 		cHandles.deviceCount, cHandles.cudart, _ = LoadCUDARTMgmt([]string{cudartLibPath})
 		return cHandles
 	}
-
 
 	slog.Debug("searching for GPU discovery libraries for NVIDIA")
 	var cudartMgmtPatterns []string
@@ -169,6 +170,17 @@ func initCudaHandles() *cudaHandles {
 		}
 	}
 	return cHandles
+}
+
+func GetCPUInfo() GpuInfoList {
+	gpuMutex.Lock()
+	if !bootstrapped {
+		gpuMutex.Unlock()
+		GetGPUInfo()
+	} else {
+		gpuMutex.Unlock()
+	}
+	return GpuInfoList{cpus[0].GpuInfo}
 }
 
 func GetGPUInfo() GpuInfoList {
@@ -285,8 +297,8 @@ func GetGPUInfo() GpuInfoList {
 
 		// Intel
 		if envconfig.IntelGpu {
-			oHandles = initOneAPIHandles()
-			for d := range oHandles.oneapi.num_drivers {
+			//oHandles = initOneAPIHandles()
+			/*for d := range oHandles.oneapi.num_drivers {
 				if oHandles.oneapi == nil {
 					// shouldn't happen
 					slog.Warn("nil oneapi handle with driver count", "count", int(oHandles.oneapi.num_drivers))
@@ -313,13 +325,13 @@ func GetGPUInfo() GpuInfoList {
 					// TODO dependency path?
 					oneapiGPUs = append(oneapiGPUs, gpuInfo)
 				}
-			}
+			}*/
 		}
 
 		rocmGPUs = AMDGetGPUInfo()
 		vHandles = initVulkanHandles()
 
-		C.vulkan_check_vram(*gpuHandles.vulkan, &memInfo)
+		C.vulkan_check_vram(*vHandles.vulkan, &memInfo)
 		if memInfo.err != nil {
 			slog.Info(fmt.Sprintf("error looking up vulkan GPU memory: %s", C.GoString(memInfo.err)))
 			C.free(unsafe.Pointer(memInfo.err))
@@ -334,9 +346,9 @@ func GetGPUInfo() GpuInfoList {
 			//	slog.Info(fmt.Sprintf("failed to look up vulkan version: %s", verString))
 			//}
 			gpuInfo := VulkanGPUInfo{
-				GpuInfo: GpuInfo {
-				Library: "vulkan",
-				}
+				GpuInfo: GpuInfo{
+					Library: "vulkan",
+				},
 			}
 
 			// Copied from rocm, but this crashes?
@@ -426,7 +438,7 @@ func GetGPUInfo() GpuInfoList {
 		}
 
 		if oHandles == nil && len(oneapiGPUs) > 0 {
-			oHandles = initOneAPIHandles()
+			//oHandles = initOneAPIHandles()
 		}
 		for i, gpu := range oneapiGPUs {
 			if oHandles.oneapi == nil {
@@ -447,7 +459,7 @@ func GetGPUInfo() GpuInfoList {
 		}
 
 		vHandles = initVulkanHandles()
-		C.vulkan_check_vram(*gpuHandles.vulkan, &memInfo)
+		C.vulkan_check_vram(*vHandles.vulkan, &memInfo)
 		if memInfo.err != nil {
 			slog.Info(fmt.Sprintf("error looking up vulkan GPU memory: %s", C.GoString(memInfo.err)))
 			C.free(unsafe.Pointer(memInfo.err))
@@ -464,8 +476,8 @@ func GetGPUInfo() GpuInfoList {
 
 			// Copied from rocm, but this crashes?
 			//C.free(unsafe.Pointer(version.str))
-			vulkanGPUs[0].TotalMemory = uint64(memInfo.total)
-			vulkanGPUs[0].FreeMemory = uint64(memInfo.free)
+			vulkanGPUs[0].TotalMemory = uint64(memInfo.total) / 2
+			vulkanGPUs[0].FreeMemory = uint64(memInfo.free) / 2
 			// higher numbers time out on my machine
 			//gpuInfo.FreeMemory = uint64(3221000000)
 			//gpuInfo.ID = C.GoString(&memInfo.gpu_id[0])

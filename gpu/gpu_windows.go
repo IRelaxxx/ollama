@@ -47,6 +47,7 @@ var VulkanGlobs = []string{
 var CudartMgmtName = "cudart64_*.dll"
 var NvcudaMgmtName = "nvcuda.dll"
 var NvmlMgmtName = "nvml.dll"
+var VulkanMgmtName = "vulkan-1.dll"
 var OneapiMgmtName = "ze_intel_gpu64.dll"
 
 func GetCPUMem() (memInfo, error) {
